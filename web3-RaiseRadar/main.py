@@ -2,6 +2,7 @@ import os
 import requests
 from typing import List, Optional
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware  # Added for Vercel/Warden compatibility
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -16,13 +17,23 @@ load_dotenv()
 
 app = FastAPI(title="Web3 RaiseRadar Agent")
 
+# --- ADDED: CORS Middleware ---
+# This allows the Warden Vercel tester to call your Railway URL
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # 2. Define Custom CryptoPanic Tool
 @tool
 def fetch_crypto_news(query: str) -> str:
     """
     Fetches trending crypto news and market sentiment from CryptoPanic.
     """
-    # DEBUG: Crucial for monitoring Render logs
+    # DEBUG: Crucial for monitoring Railway logs
     print(f"DEBUG: Accessing CryptoPanic for: {query}")
     
     api_key = os.getenv("CRYPTOPANIC_API_KEY")
@@ -55,8 +66,7 @@ def fetch_crypto_news(query: str) -> str:
     except Exception as e:
         return f"CryptoPanic Error: {str(e)}"
 
-# 3. Enhanced Search Tool (THE FIX)
-# We add 'advanced' depth to catch news from the last 48 hours
+# 3. Enhanced Search Tool
 search_tool = TavilySearch(
     max_results=5, 
     search_depth="advanced", 
@@ -82,7 +92,7 @@ system_msg = (
     "4. Format responses in a Markdown Table: Project | Event | Date | Source/Link."
 )
 
-agent_app = create_react_agent(llm, tools, prompt=system_msg)
+agent_app = create_react_agent(llm, tools, state_modifier=system_msg)
 
 # 6. API Models
 class ChatQuery(BaseModel):
@@ -97,7 +107,6 @@ async def chat_endpoint(query: ChatQuery):
         
         final_answer = result["messages"][-1].content
         
-        # This structure helps the Warden App parse your Markdown tables correctly
         return {
             "response": [
                 {
@@ -115,5 +124,6 @@ async def health_check():
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8000))
+    # Railway sets the PORT environment variable automatically
+    port = int(os.environ.get("PORT", 8080))
     uvicorn.run(app, host="0.0.0.0", port=port)
