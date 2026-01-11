@@ -1,9 +1,11 @@
 import os
 import requests
 import uuid
+import json
 from typing import List, Optional
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware  # Added for Vercel/Warden compatibility
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -193,9 +195,46 @@ async def runs_wait(request: Request):
         ]
     }
 
+# --- NEW: /threads/{thread_id}/runs/stream endpoint ---
+@app.post("/threads/{thread_id}/runs/stream")
+async def runs_stream(thread_id: str, request: Request):
+    """
+    The 'engine room' of the Warden tester. 
+    It streams the agent's thoughts and final answer using SSE.
+    """
+    body = await request.json()
+    user_input = body.get("input", {}).get("messages", [])[-1].get("content", "")
+    
+    async def event_generator():
+        # Step 1: Tell the UI we are starting
+        yield f"event: metadata\ndata: {json.dumps({'run_id': str(uuid.uuid4())})}\n\n"
+        
+        # Step 2: Run the agent and stream its messages
+        inputs = {"messages": [("user", user_input)]}
+        
+        # We use .astream to get updates as they happen
+        async for chunk in agent_app.astream(inputs, stream_mode="values"):
+            if "messages" in chunk:
+                last_msg = chunk["messages"][-1]
+                # Only stream back assistant messages
+                if hasattr(last_msg, 'content') and last_msg.content:
+                    data = {
+                        "event": "values",
+                        "data": {
+                            "messages": [
+                                {"role": "assistant", "content": last_msg.content}
+                            ]
+                        }
+                    }
+                    yield f"data: {json.dumps(data)}\n\n"
+        
+        # Step 3: Signal completion
+        yield "event: end\ndata: {}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
 if __name__ == "__main__":
     import uvicorn
     # Railway sets the PORT environment variable automatically
     port = int(os.environ.get("PORT", 8080))
     uvicorn.run(app, host="0.0.0.0", port=port)
-
