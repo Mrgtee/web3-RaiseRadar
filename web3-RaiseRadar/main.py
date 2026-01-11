@@ -1,7 +1,8 @@
 import os
 import requests
+import uuid
 from typing import List, Optional
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware  # Added for Vercel/Warden compatibility
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -101,6 +102,10 @@ agent_app = create_react_agent(llm, tools, prompt=system_msg)
 class ChatQuery(BaseModel):
     message: str
 
+# --- NEW: ThreadRequest Model ---
+class ThreadRequest(BaseModel):
+    metadata: Optional[dict] = {}
+
 # 7. Endpoints
 @app.post("/chat")
 async def chat_endpoint(query: ChatQuery):
@@ -126,7 +131,6 @@ async def health_check():
     return {"status": "active", "agent": "RaiseRadar-v1"}
 
 # --- ADDED: Warden / LangGraph compatibility endpoints ---
-
 @app.get("/info")
 async def info():
     """Returns agent metadata expected by the Warden/LangGraph tester."""
@@ -150,6 +154,44 @@ async def assistants_search():
             "name": "RaiseRadar Agent"
         }
     ]
+
+# --- NEW: /threads endpoint ---
+@app.post("/threads")
+async def create_thread(request: ThreadRequest):
+    """
+    Creates a unique thread ID for the conversation.
+    The Warden tester needs this to start the chat.
+    """
+    new_thread_id = str(uuid.uuid4())
+    print(f"DEBUG: Created new thread: {new_thread_id}")
+    return {
+        "thread_id": new_thread_id,
+        "metadata": request.metadata,
+        "created_at": "2026-01-11T00:00:00Z",  # Current date
+        "updated_at": "2026-01-11T00:00:00Z"
+    }
+
+# --- NEW: /runs/wait endpoint ---
+@app.post("/runs/wait")
+async def runs_wait(request: Request):
+    body = await request.json()
+    # Extract the message from the standard LangGraph body
+    user_input = body.get("input", {}).get("messages", [])[-1].get("content", "")
+    
+    # Optional: You can extract thread_id if you want to save history later
+    # thread_id = body.get("thread_id") 
+
+    inputs = {"messages": [("user", user_input)]}
+    result = await agent_app.ainvoke(inputs)
+    
+    return {
+        "messages": [
+            {
+                "role": "assistant",
+                "content": result["messages"][-1].content
+            }
+        ]
+    }
 
 if __name__ == "__main__":
     import uvicorn
