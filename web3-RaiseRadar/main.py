@@ -32,6 +32,10 @@ app.add_middleware(
 # 2. Define Custom CryptoPanic Tool
 @tool
 def fetch_crypto_news(query: str) -> str:
+    """
+    Fetches trending crypto news and market sentiment from CryptoPanic.
+    Use this when the user asks for news, trends, or sentiment about a specific coin.
+    """
     print(f"DEBUG: Accessing CryptoPanic for: {query}")
 
     api_key = os.getenv("CRYPTOPANIC_API_KEY")
