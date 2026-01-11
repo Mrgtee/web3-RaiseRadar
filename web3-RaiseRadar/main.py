@@ -4,7 +4,7 @@ import uuid
 import json
 from typing import List, Optional
 from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware  # Added for Vercel/Warden compatibility
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -32,9 +32,6 @@ app.add_middleware(
 # 2. Define Custom CryptoPanic Tool
 @tool
 def fetch_crypto_news(query: str) -> str:
-    """
-    Fetches trending crypto news and market sentiment from CryptoPanic.
-    """
     print(f"DEBUG: Accessing CryptoPanic for: {query}")
 
     api_key = os.getenv("CRYPTOPANIC_API_KEY")
@@ -114,11 +111,12 @@ class HistoryRequest(BaseModel):
 async def chat_endpoint(query: ChatQuery):
     inputs = {"messages": [("user", query.message)]}
     result = await agent_app.ainvoke(inputs)
+    final_content = result["messages"][-1].content
     return {
         "response": [
             {
                 "type": "text",
-                "text": result["messages"][-1].content
+                "text": final_content
             }
         ]
     }
@@ -164,11 +162,14 @@ async def runs_wait(request: Request):
     body = await request.json()
     user_input = body.get("input", {}).get("messages", [])[-1].get("content", "")
     result = await agent_app.ainvoke({"messages": [("user", user_input)]})
+    final_content = result["messages"][-1].content
     return {
         "messages": [
             {
                 "role": "assistant",
-                "content": result["messages"][-1].content
+                "type": "ai",
+                "content": final_content,
+                "metadata": {}
             }
         ]
     }
@@ -188,7 +189,7 @@ async def runs_stream(thread_id: str, request: Request):
             if "messages" in chunk:
                 msg = chunk["messages"][-1]
                 if getattr(msg, "content", None):
-                    yield f"data: {json.dumps({'event': 'values','data': {'messages':[{'role':'assistant','content': msg.content}]}})}\n\n"
+                    yield f"data: {json.dumps({'event': 'values','data': {'messages':[{'role':'assistant','type':'ai','content': msg.content,'metadata': {}}]}})}\n\n"
 
         yield "event: end\ndata: {}\n\n"
 
@@ -200,40 +201,25 @@ async def get_thread_history(thread_id: str, request: Optional[HistoryRequest] =
     return [
         {
             "role": "assistant",
-            "content": "I'm ready! I've analyzed the latest Web3 raises. What would you like to know?",
             "type": "ai",
+            "content": "I'm ready! I've analyzed the latest Web3 raises. What would you like to know?",
             "metadata": {}
         }
     ]
 
-# --- NEW: Agent Card (Warden / Vercel Discovery) ---
+# --- Updated Agent Card (Warden / Vercel Discovery) ---
 @app.get("/.well-known/agent.json")
-async def agent_card():
+async def get_agent_manifest():
     return {
         "name": "Web3 RaiseRadar",
-        "description": "Real-time Web3 funding research and project deep-dives.",
+        "description": "Real-time funding research and Web3 project tracking.",
         "version": "1.0.0",
         "url": "https://web3-raiseradar-production-1f6f.up.railway.app",
-        "capabilities": {
-            "streaming": True,
-            "stateTransitionHistory": True
-        },
-        "skills": [
-            {
-                "id": "funding-search",
-                "name": "Funding Search",
-                "description": "Finds the latest venture capital rounds and ICO dates."
-            },
-            {
-                "id": "sentiment-analysis",
-                "name": "Market Sentiment",
-                "description": "Analyzes trending news from CryptoPanic for project sentiment."
-            }
-        ]
+        "skills": ["funding-research", "sentiment-analysis"],
+        "author": "YourGitHubUsername"
     }
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8080))
     uvicorn.run(app, host="0.0.0.0", port=port)
-
