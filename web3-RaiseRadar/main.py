@@ -92,7 +92,7 @@ system_msg = (
     "4. Format responses in a Markdown Table: Project | Event | Date | Source/Link."
 )
 
-agent_app = create_react_agent(llm, tools, state_modifier=system_msg)
+agent_app = create_react_agent(llm, tools, prompt=system_msg)
 
 # 6. API Models
 class ChatQuery(BaseModel):
