@@ -178,13 +178,14 @@ async def runs_wait(request: Request):
         ]
     }
 
-# ✅ ONLY PATCHED SECTION (VERCEL STREAM FIX)
+#  ONLY PATCHED SECTION (VERCEL STREAM FIX)
 @app.post("/threads/{thread_id}/runs/stream")
 async def runs_stream(thread_id: str, request: Request):
     body = await request.json()
     user_input = body.get("input", {}).get("messages", [])[-1].get("content", "")
 
     async def event_generator():
+        # REQUIRED: metadata event
         yield f"event: metadata\ndata: {json.dumps({'run_id': str(uuid.uuid4())})}\n\n"
 
         async for chunk in agent_app.astream(
@@ -193,21 +194,20 @@ async def runs_stream(thread_id: str, request: Request):
         ):
             if "messages" in chunk:
                 msg = chunk["messages"][-1]
-                if hasattr(msg, "content") and msg.content and msg.type == "ai":
+
+                if hasattr(msg, "content") and msg.content:
                     payload = {
-                        "event": "values",
-                        "data": {
-                            "messages": [
-                                {
-                                    "role": "assistant",
-                                    "type": "ai",
-                                    "content": msg.content,
-                                    "metadata": msg.response_metadata if hasattr(msg, "response_metadata") else {}
-                                }
-                            ]
-                        }
+                        "messages": [
+                            {
+                                "role": "assistant",
+                                "type": "ai",
+                                "content": msg.content,
+                                "metadata": {}
+                            }
+                        ]
                     }
-                    yield f"data: {json.dumps(payload)}\n\n"
+
+                    yield f"event: values\ndata: {json.dumps(payload)}\n\n"
 
         yield "event: end\ndata: {}\n\n"
 
