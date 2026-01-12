@@ -20,13 +20,14 @@ load_dotenv()
 
 app = FastAPI(title="Web3 RaiseRadar Agent")
 
-# --- MANDATORY: CORS Middleware for Warden Studio ---
+# --- MANDATORY CORS ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["x-vercel-ai-ui-message-stream"] # Crucial for some UI versions
 )
 
 # 2. Define Custom CryptoPanic Tool
@@ -36,109 +37,58 @@ def fetch_crypto_news(query: str) -> str:
     Fetches trending crypto news and market sentiment from CryptoPanic.
     Use this when the user asks for news, trends, or sentiment about a specific coin.
     """
-    print(f"DEBUG: Accessing CryptoPanic for: {query}")
-
     api_key = os.getenv("CRYPTOPANIC_API_KEY")
     url = "https://cryptopanic.com/api/developer/v2/posts/"
+    params = {"auth_token": api_key, "public": "true", "kind": "news", "regions": "en", "filter": "hot"}
 
-    params = {
-        "auth_token": api_key,
-        "public": "true",
-        "kind": "news",
-        "regions": "en",
-        "filter": "hot"
-    }
-
-    if "bitcoin" in query.lower() or "btc" in query.lower():
-        params["currencies"] = "BTC"
-    elif "ethereum" in query.lower() or "eth" in query.lower():
-        params["currencies"] = "ETH"
+    if any(x in query.lower() for x in ["bitcoin", "btc"]): params["currencies"] = "BTC"
+    elif any(x in query.lower() for x in ["ethereum", "eth"]): params["currencies"] = "ETH"
 
     try:
         response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
-        data = response.json()
-        results = data.get("results", [])[:3]
-
-        if not results:
-            return "No recent hot news found on CryptoPanic."
-
-        news_list = [
-            f"- **{p['title']}**\n  Source: {p['url']}"
-            for p in results
-        ]
-        return "\n".join(news_list)
+        results = response.json().get("results", [])[:3]
+        if not results: return "No recent hot news found."
+        return "\n".join([f"- **{p['title']}**\n Source: {p['url']}" for p in results])
     except Exception as e:
         return f"CryptoPanic Error: {str(e)}"
 
-# 3. Enhanced Search Tool
-search_tool = TavilySearch(
-    max_results=5,
-    search_depth="advanced",
-    include_answer=True
-)
-
-# 4. Setup Tools and Gemini LLM
+# 3. Setup Agent
+search_tool = TavilySearch(max_results=5, search_depth="advanced", include_answer=True)
 tools = [search_tool, fetch_crypto_news]
 
 llm = ChatGoogleGenerativeAI(
-    model="gemini-2.0-flash", # Use standard stable model name
+    model="gemini-1.5-flash", # Use standard stable identifier
     google_api_key=os.getenv("GEMINI_API_KEY"),
     temperature=0.1
 )
 
-# 5. System Prompt
 system_msg = (
     "You are the Web3 RaiseRadar Agent. "
-    "1. For funding research or project deep dives, ALWAYS use 'tavily_search_results_json'. "
-    "2. For high-level trending headlines, use 'fetch_crypto_news'. "
-    "3. IMPORTANT: When users ask about dates (ICOs, Sales, Auctions), cross-reference "
-    "carefully. If a date changed recently, state the NEW date clearly. "
-    "4. Format responses in a Markdown Table: Project | Event | Date | Source/Link."
+    "1. For funding deep dives, ALWAYS use 'tavily_search_results_json'. "
+    "2. For high-level news, use 'fetch_crypto_news'. "
+    "3. Format responses in a Markdown Table: Project | Event | Date | Source/Link."
 )
 
 agent_app = create_react_agent(llm, tools, prompt=system_msg)
 
-# 6. API Models
+# 4. Models
 class ThreadRequest(BaseModel):
     metadata: Optional[dict] = {}
 
-class HistoryRequest(BaseModel):
-    limit: Optional[int] = 10
-    before: Optional[str] = None
-
-# 7. Endpoints
-@app.get("/")
-async def health_check():
-    return {"status": "active", "agent": "RaiseRadar-v1"}
-
+# 5. Core Endpoints
 @app.get("/info")
 async def info():
-    return {
-        "assistant_id": "raiseradar",
-        "graph_id": "web",
-        "config": {},
-    }
-
-@app.post("/threads/search")
-async def threads_search():
-    return []
-
-@app.post("/assistants/search")
-async def assistants_search():
-    return [{"assistant_id": "raiseradar", "name": "RaiseRadar Agent"}]
+    return {"assistant_id": "Web3-RaiseRadar", "graph_id": "Web3-RaiseRadar", "config": {}}
 
 @app.post("/threads")
 async def create_thread(request: ThreadRequest):
-    new_thread_id = str(uuid.uuid4())
-    return {
-        "thread_id": new_thread_id,
-        "metadata": request.metadata,
-        "created_at": "2026-01-11T00:00:00Z",
-        "updated_at": "2026-01-11T00:00:00Z"
-    }
+    return {"thread_id": str(uuid.uuid4()), "metadata": request.metadata}
 
-# --- CRITICAL: FIXED VERCEL DATA STREAM PROTOCOL ---
+@app.post("/threads/search")
+async def threads_search(): return []
+
+# CRITICAL: FIXED VERCEL DATA STREAM PROTOCOL (v1)
 @app.post("/threads/{thread_id}/runs/stream")
 async def runs_stream(thread_id: str, request: Request):
     body = await request.json()
@@ -146,23 +96,29 @@ async def runs_stream(thread_id: str, request: Request):
     user_input = messages[-1].get("content", "") if messages else ""
 
     async def event_generator():
-        # Start with a text part marker
-        yield f'0:""\n'
+        # Vercel Protocol expects chunks prefixed by type codes.
+        # 0: Text Part
+        # b: Message Annotations / Metadata
+        # d: Data Part
+        
+        # Initialize the UI message bubble
+        yield f'0:""\n' 
 
         async for chunk in agent_app.astream(
             {"messages": [("user", user_input)]},
-            stream_mode="updates"
+            stream_mode="updates" # 'updates' catches node completion
         ):
             for node_name, data in chunk.items():
                 if "messages" in data:
                     msg = data["messages"][-1]
+                    # Only emit final AI content to the main text stream
                     if hasattr(msg, "content") and msg.content and msg.type == "ai":
-                        # Vercel Protocol: 0:"content"\n
-                        # Must be JSON encoded to handle special characters/newlines
-                        text_chunk = json.dumps(msg.content)
-                        yield f'0:{text_chunk}\n'
+                        # Format: 0:"the text"\n
+                        # Using json.dumps handles the required escaping of newlines/quotes
+                        content = json.dumps(msg.content)
+                        yield f'0:{content}\n'
 
-        # Signal completion
+        # Signal completion with a finish reason
         yield 'd:{"finishReason":"stop"}\n'
 
     return StreamingResponse(
@@ -170,36 +126,24 @@ async def runs_stream(thread_id: str, request: Request):
         media_type="text/plain; charset=utf-8",
         headers={
             "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
-            "x-vercel-ai-ui-message-stream": "v1"
+            "x-vercel-ai-ui-message-stream": "v1" # This tells the UI to use the v1 protocol
         }
     )
 
 @app.post("/threads/{thread_id}/history")
-async def get_thread_history(thread_id: str, request: Optional[HistoryRequest] = None):
-    # Warden UI needs this to show the message on screen after streaming stops
-    return [
-        {
-            "role": "assistant",
-            "type": "ai",
-            "content": "I'm ready! I've analyzed the latest Web3 raises. What would you like to know?",
-            "metadata": {}
-        }
-    ]
+async def get_thread_history(thread_id: str):
+    # History must return an array of messages
+    return [{"role": "assistant", "type": "ai", "content": "RaiseRadar online. How can I help?", "metadata": {}}]
 
 @app.get("/.well-known/agent.json")
 async def get_agent_manifest():
     return {
         "name": "Web3 RaiseRadar",
-        "description": "Real-time funding research and Web3 project tracking.",
-        "version": "1.0.0",
-        "url": "https://web3-raiseradar-production-1f6f.up.railway.app", # Verify this is correct
-        "skills": ["funding-research", "sentiment-analysis"],
-        "author": "Mrgtee"
+        "url": "https://web3-raiseradar-production-1f6f.up.railway.app",
+        "version": "1.0.0"
     }
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
