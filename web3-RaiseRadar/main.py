@@ -20,7 +20,7 @@ load_dotenv()
 
 app = FastAPI(title="Web3 RaiseRadar Agent")
 
-# --- ADDED: CORS Middleware ---
+# --- MANDATORY: CORS Middleware for Warden Studio ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -82,27 +82,24 @@ search_tool = TavilySearch(
 tools = [search_tool, fetch_crypto_news]
 
 llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash",
+    model="gemini-2.0-flash", # Use standard stable model name
     google_api_key=os.getenv("GEMINI_API_KEY"),
     temperature=0.1
 )
 
-# 5. Strengthened System Prompt
+# 5. System Prompt
 system_msg = (
     "You are the Web3 RaiseRadar Agent. "
     "1. For funding research or project deep dives, ALWAYS use 'tavily_search_results_json'. "
     "2. For high-level trending headlines, use 'fetch_crypto_news'. "
     "3. IMPORTANT: When users ask about dates (ICOs, Sales, Auctions), cross-reference "
-    "carefully. If a date changed recently (like Zama's), state the NEW date clearly. "
+    "carefully. If a date changed recently, state the NEW date clearly. "
     "4. Format responses in a Markdown Table: Project | Event | Date | Source/Link."
 )
 
 agent_app = create_react_agent(llm, tools, prompt=system_msg)
 
 # 6. API Models
-class ChatQuery(BaseModel):
-    message: str
-
 class ThreadRequest(BaseModel):
     metadata: Optional[dict] = {}
 
@@ -111,20 +108,6 @@ class HistoryRequest(BaseModel):
     before: Optional[str] = None
 
 # 7. Endpoints
-@app.post("/chat")
-async def chat_endpoint(query: ChatQuery):
-    inputs = {"messages": [("user", query.message)]}
-    result = await agent_app.ainvoke(inputs)
-    final_content = result["messages"][-1].content
-    return {
-        "response": [
-            {
-                "type": "text",
-                "text": final_content
-            }
-        ]
-    }
-
 @app.get("/")
 async def health_check():
     return {"status": "active", "agent": "RaiseRadar-v1"}
@@ -133,7 +116,7 @@ async def health_check():
 async def info():
     return {
         "assistant_id": "raiseradar",
-        "graph_id": "agent",
+        "graph_id": "web",
         "config": {},
     }
 
@@ -143,17 +126,11 @@ async def threads_search():
 
 @app.post("/assistants/search")
 async def assistants_search():
-    return [
-        {
-            "assistant_id": "raiseradar",
-            "name": "RaiseRadar Agent"
-        }
-    ]
+    return [{"assistant_id": "raiseradar", "name": "RaiseRadar Agent"}]
 
 @app.post("/threads")
 async def create_thread(request: ThreadRequest):
     new_thread_id = str(uuid.uuid4())
-    print(f"DEBUG: Created new thread: {new_thread_id}")
     return {
         "thread_id": new_thread_id,
         "metadata": request.metadata,
@@ -161,59 +138,36 @@ async def create_thread(request: ThreadRequest):
         "updated_at": "2026-01-11T00:00:00Z"
     }
 
-@app.post("/runs/wait")
-async def runs_wait(request: Request):
-    body = await request.json()
-    user_input = body.get("input", {}).get("messages", [])[-1].get("content", "")
-    result = await agent_app.ainvoke({"messages": [("user", user_input)]})
-    final_content = result["messages"][-1].content
-    return {
-        "messages": [
-            {
-                "role": "assistant",
-                "type": "ai",
-                "content": final_content,
-                "metadata": {}
-            }
-        ]
-    }
-
-#  ONLY PATCHED SECTION (VERCEL STREAM FIX)
+# --- CRITICAL: FIXED VERCEL DATA STREAM PROTOCOL ---
 @app.post("/threads/{thread_id}/runs/stream")
 async def runs_stream(thread_id: str, request: Request):
     body = await request.json()
-    user_input = body.get("input", {}).get("messages", [])[-1].get("content", "")
+    messages = body.get("input", {}).get("messages", [])
+    user_input = messages[-1].get("content", "") if messages else ""
 
     async def event_generator():
-        # REQUIRED: metadata event
-        yield f"event: metadata\ndata: {json.dumps({'run_id': str(uuid.uuid4())})}\n\n"
+        # Start with a text part marker
+        yield f'0:""\n'
 
         async for chunk in agent_app.astream(
             {"messages": [("user", user_input)]},
-            stream_mode="values"
+            stream_mode="updates"
         ):
-            if "messages" in chunk:
-                msg = chunk["messages"][-1]
+            for node_name, data in chunk.items():
+                if "messages" in data:
+                    msg = data["messages"][-1]
+                    if hasattr(msg, "content") and msg.content and msg.type == "ai":
+                        # Vercel Protocol: 0:"content"\n
+                        # Must be JSON encoded to handle special characters/newlines
+                        text_chunk = json.dumps(msg.content)
+                        yield f'0:{text_chunk}\n'
 
-                if hasattr(msg, "content") and msg.content:
-                    payload = {
-                        "messages": [
-                            {
-                                "role": "assistant",
-                                "type": "ai",
-                                "content": msg.content,
-                                "metadata": {}
-                            }
-                        ]
-                    }
-
-                    yield f"event: values\ndata: {json.dumps(payload)}\n\n"
-
-        yield "event: end\ndata: {}\n\n"
+        # Signal completion
+        yield 'd:{"finishReason":"stop"}\n'
 
     return StreamingResponse(
         event_generator(),
-        media_type="text/event-stream",
+        media_type="text/plain; charset=utf-8",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
@@ -224,7 +178,7 @@ async def runs_stream(thread_id: str, request: Request):
 
 @app.post("/threads/{thread_id}/history")
 async def get_thread_history(thread_id: str, request: Optional[HistoryRequest] = None):
-    print(f"DEBUG: Warden UI requesting history for thread: {thread_id}")
+    # Warden UI needs this to show the message on screen after streaming stops
     return [
         {
             "role": "assistant",
@@ -240,12 +194,12 @@ async def get_agent_manifest():
         "name": "Web3 RaiseRadar",
         "description": "Real-time funding research and Web3 project tracking.",
         "version": "1.0.0",
-        "url": "https://web3-raiseradar-production-1f6f.up.railway.app",
+        "url": "https://web3-raiseradar-production-1f6f.up.railway.app", # Verify this is correct
         "skills": ["funding-research", "sentiment-analysis"],
-        "author": "YourGitHubUsername"
+        "author": "Mrgtee"
     }
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
