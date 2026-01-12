@@ -178,6 +178,7 @@ async def runs_wait(request: Request):
         ]
     }
 
+# ✅ ONLY PATCHED SECTION (VERCEL STREAM FIX)
 @app.post("/threads/{thread_id}/runs/stream")
 async def runs_stream(thread_id: str, request: Request):
     body = await request.json()
@@ -192,12 +193,34 @@ async def runs_stream(thread_id: str, request: Request):
         ):
             if "messages" in chunk:
                 msg = chunk["messages"][-1]
-                if getattr(msg, "content", None):
-                    yield f"data: {json.dumps({'event': 'values','data': {'messages':[{'role':'assistant','type':'ai','content': msg.content,'metadata': {}}]}})}\n\n"
+                if hasattr(msg, "content") and msg.content and msg.type == "ai":
+                    payload = {
+                        "event": "values",
+                        "data": {
+                            "messages": [
+                                {
+                                    "role": "assistant",
+                                    "type": "ai",
+                                    "content": msg.content,
+                                    "metadata": msg.response_metadata if hasattr(msg, "response_metadata") else {}
+                                }
+                            ]
+                        }
+                    }
+                    yield f"data: {json.dumps(payload)}\n\n"
 
         yield "event: end\ndata: {}\n\n"
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+            "x-vercel-ai-ui-message-stream": "v1"
+        }
+    )
 
 @app.post("/threads/{thread_id}/history")
 async def get_thread_history(thread_id: str, request: Optional[HistoryRequest] = None):
@@ -211,7 +234,6 @@ async def get_thread_history(thread_id: str, request: Optional[HistoryRequest] =
         }
     ]
 
-# --- Updated Agent Card (Warden / Vercel Discovery) ---
 @app.get("/.well-known/agent.json")
 async def get_agent_manifest():
     return {
